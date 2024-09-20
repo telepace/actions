@@ -22,10 +22,6 @@
 5. 在弹出的表单中，填写所需的输入参数。
 6. 点击 **Run workflow** 开始执行。
 
-**输入参数示例：**
-
-![Run Workflow](https://docs.github.com/assets/images/help/repository/run-workflow-button.png)
-
 ### 2. 通过 GitHub CLI (`gh` 命令行工具) 触发
 
 GitHub CLI 是一个强大的工具，可以让你通过命令行与 GitHub 交互，包括触发工作流。以下是使用 GitHub CLI 触发 Go 构建工作流的示例。

@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check Out
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup timezone
         uses: zcong1993/setup-timezone@master
@@ -60,10 +60,11 @@ jobs:
       - name: Git clone
         id: redy
         env:
-          REPO_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_ACCESS_TOKEN: ${{ secrets.GITHUB_BOT_TOKEN }}
         run: |
-          # 清理工作目录
-          rm -rf ./*
+          # 清理工作目录，包括隐藏文件
+          rm -rf ./* ./.??*
+          
           REPO_URL="${{ github.event.inputs.repoUrl }}"
           BRANCH="${{ github.event.inputs.repoBranch }}"
           
@@ -80,27 +81,29 @@ jobs:
           else
             git clone --depth 1 "$AUTH_REPO_URL" .
           fi
-      
+          
           # 下载自定义 Dockerfile
           if [[ "${{ github.event.inputs.dockerFileUrl }}" != "" ]]; then
             wget "${{ github.event.inputs.dockerFileUrl }}" -O ./Dockerfile
           fi
-      
+          
           # 下载并运行自定义脚本
           if [[ "${{ github.event.inputs.shellUrl }}" != "" ]]; then
             wget "${{ github.event.inputs.shellUrl }}" -O /tmp/.customize_shell.sh
             chmod +x /tmp/.customize_shell.sh
             /tmp/.customize_shell.sh
           fi
-      
+          
           # 运行自定义 Shell 命令
           if [[ "${{ github.event.inputs.shell }}" != "" ]]; then
             eval "${{ github.event.inputs.shell }}"
           fi
-      
+          
           # 设置 Docker Hub 凭据
-          dockerHubUsername=${{ secrets.DOCKER_USERNAME }}
-          dockerHubPassword=${{ secrets.DOCKER_PASSWORD }}
+          dockerHubUsername="${{ secrets.DOCKER_USERNAME }}"
+          dockerHubPassword="${{ secrets.DOCKER_PASSWORD }}"
+          
+          # 可选环境变量覆盖
           if [[ "${{ env.DOCKER_USERNAME }}" != "" ]]; then
             dockerHubUsername="${{ env.DOCKER_USERNAME }}"
           fi
@@ -113,7 +116,7 @@ jobs:
           if [[ "${{ env.tmpToken }}" != "" ]]; then
             dockerHubPassword="${{ env.tmpToken }}"
           fi
-      
+          
           # 生成镜像名称
           imageName="${{ github.event.inputs.imageName }}"
           if [[ -z "$imageName" ]]; then
@@ -121,7 +124,7 @@ jobs:
             imageName=$(echo "$imageName" | tr '[:upper:]' '[:lower:]')
             echo "auto docker image name ${{ github.event.inputs.repoUrl }} => $imageName"
           fi
-      
+          
           # 设置输出变量
           echo "dockerHubUsername=$dockerHubUsername" >> $GITHUB_OUTPUT
           echo "dockerHubPassword=$dockerHubPassword" >> $GITHUB_OUTPUT

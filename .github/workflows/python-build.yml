@@ -1,0 +1,173 @@
+name: 'python-build-and-download'
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      repoPath:
+        description: 'Git 仓库路径'
+        required: true
+      repoBranch:
+        description: '指定分支'
+        required: false
+      shellUrl:
+        description: '构建前运行脚本 URL'
+        required: false
+      shell:
+        description: '构建前运行 shell 命令，如 cd 或 pip install 等'
+        required: false
+      PYTHON_VERSION:
+        description: 'Python 版本'
+        required: false
+        default: '3.11'
+      UPLOAD_RELEASE:
+        description: '是否上传到 RELEASE 页面'
+        required: false
+        default: false
+        type: boolean
+      UPLOAD_TRANSFER:
+        description: '上传服务，例如 wet，参考 https://github.com/Mikubill/transfer#support'
+        required: false
+      UPLOAD_TAG:
+        description: '上传文件使用的 TAG，默认使用构建时间'
+        required: false
+      platforms:
+        description: '需要构建的平台（主要针对不同的操作系统和架构），多个平台用逗号分隔'
+        required: true
+        default: win-x64,linux-x64,linux-arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: ${{ fromJson('["win-x64","linux-x64","linux-arm64"]') }}
+    steps:
+      - name: Check Out Repository
+        uses: actions/checkout@v3
+
+      # 生成 TAG
+      - name: Generate Tag
+        id: tag
+        run: |
+          tag="build-python_$(date +'%m-%d_%H-%M-%S')"
+          if [ "${{ github.event.inputs.UPLOAD_TAG }}" != "" ]; then
+            tag="${{ github.event.inputs.UPLOAD_TAG }}"
+          fi
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
+      # 设置 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ github.event.inputs.PYTHON_VERSION }}
+
+      # 缓存 pip 依赖
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # 安装构建依赖
+      - name: Install Build Dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      # 克隆目标仓库并准备上下文
+      - name: Git Clone Target Repository
+        run: |
+          rm -rf {*,.[^.]*,..?*}
+          if [[ "${{ github.event.inputs.repoBranch }}" ]]; then
+            git clone --depth 1 -b "${{ github.event.inputs.repoBranch }}" "${{ github.event.inputs.repoPath }}" .
+          else
+            git clone --depth 1 "${{ github.event.inputs.repoPath }}" .
+          fi
+          if [[ "${{ github.event.inputs.shellUrl }}" ]]; then
+            wget "${{ github.event.inputs.shellUrl }}" -O /tmp/.customize_shell.sh
+            chmod +x /tmp/.customize_shell.sh
+            /tmp/.customize_shell.sh
+          fi
+          if [[ "${{ github.event.inputs.shell }}" ]]; then
+            eval "${{ github.event.inputs.shell }}"
+          fi
+
+      # 安装项目依赖
+      - name: Install Project Dependencies
+        run: |
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          elif [ -f "pyproject.toml" ]; then
+            pip install build
+          fi
+
+      # 开始构建
+      - name: Build Project for ${{ matrix.platform }}
+        id: build_${{ matrix.platform }}
+        run: |
+          mkdir -p /tmp/dist
+          mkdir -p /tmp/build_log
+          echo -e "GitHub Actions Build\nStart time: $(date +'%Y-%m-%d %H:%M:%S')\n" > release.txt
+          echo "Building for ${{ matrix.platform }}"
+          case ${{ matrix.platform }} in
+            win-*)
+              PYOS="windows"
+              PYARCH="${{ matrix.platform#win- }}"
+              ;;
+            linux-*)
+              PYOS="linux"
+              PYARCH="${{ matrix.platform#linux- }}"
+              ;;
+            mac-*)
+              PYOS="darwin"
+              PYARCH="${{ matrix.platform#mac- }}"
+              ;;
+            *)
+              echo "::error ::Unsupported platform: ${{ matrix.platform }}"
+              exit 1
+              ;;
+          esac
+          output_dir="/tmp/dist_tmp/${{ matrix.platform }}"
+          mkdir -p "$output_dir"
+          pip wheel . --wheel-dir "$output_dir" > "/tmp/build_log/${{ matrix.platform }}.log" 2>&1
+          if [ $? -eq 0 ]; then
+            echo "Build succeeded for ${{ matrix.platform }}"
+            tar -zcvf "/tmp/dist/${{ matrix.platform }}.tar.gz" -C "$output_dir" . > /dev/null
+            echo "${{ matrix.platform }} build succeeded" >> release.txt
+          else
+            echo "::error ::Build failed for ${{ matrix.platform }}"
+            cat "/tmp/build_log/${{ matrix.platform }}.log"
+            exit 1
+          fi
+
+      # 上传构建产物（仅在最后一个矩阵任务完成后执行）
+      - name: Upload Build Artifacts
+        if: ${{ matrix.platform == matrix.platforms[-1] }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ steps.tag.outputs.tag }}
+          path: /tmp/dist.tar.gz
+          retention-days: 1
+
+      # 上传到中转服务（仅在最后一个矩阵任务完成后执行）
+      - name: Upload to Transfer Service
+        if: ${{ github.event.inputs.UPLOAD_TRANSFER }} && success() && ${{ matrix.platform == matrix.platforms[-1] }}
+        run: |
+          curl -fsSL git.io/file-transfer | sh
+          ./transfer "${{ github.event.inputs.UPLOAD_TRANSFER }}" --no-progress dist.tar.gz 2>&1 | tee transfer.log
+          url=$(grep -o 'https://[^ ]*' transfer.log)
+          echo "🔗 External Download Link: $url" >> release.txt
+          echo "::warning ::External Download Link: $url"
+
+      # 生成 Release（仅在最后一个矩阵任务完成后执行）
+      - name: Upload to GitHub Release
+        if: ${{ github.event.inputs.UPLOAD_RELEASE == 'true' }} && success() && ${{ matrix.platform == matrix.platforms[-1] }}
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          body_path: release.txt
+          files: /tmp/dist/*

@@ -1,0 +1,146 @@
+name: '*构建镜像并推送至docker hub'
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      repoUrl:
+        description: 'git仓库克隆url地址'
+        required: true
+      imageName:
+        description: '构建镜像的名称,不填写根据git地址自动生成'
+        required: false
+      repoBranch :
+        description: '指定git分支'
+        required: false
+      dockerFileUrl:
+        description: '自定义DockerFile下载路径,可空'
+        required: false
+      shellUrl:
+        description: '自定义构建前脚本下载路径,可空'
+        required: false
+      shell:
+        description: '构建前运行shell命令,执行mv Dockerfile等操作'
+        required: false
+      platforms:
+        description: '需要构建的平台'
+        required: false
+        default: linux/amd64,linux/arm64/v8
+      tags:
+        description: '自定义dockerTags,多个使用逗号分隔'
+        required: false
+        default: latest
+      timeTagsFormat:
+        description: '根据时间自动生成的dockerTag'
+        type: choice
+        default: 月-日_时-分-秒
+        options:
+          - 不生成时间tag
+          - 年-月-日_时-分-秒
+          - 年-月-日_时-分
+          - 月-日_时-分-秒
+          - 月-日_时-分
+      timeTagsPrefix:
+        description: '根据时间生成Tag的前缀'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v3
+
+      - name: Setup timezone
+        uses: zcong1993/setup-timezone@master
+        with:
+          timezone: Asia/Shanghai
+
+      # 克隆目标,并且准备上下文
+      - name: Git clone
+        id: redy
+        run: |
+         rm -rf {*,.[^.]*,..?*}
+         if [[ "${{ github.event.inputs.repoBranch }}" ]] ;then git clone --depth 1 -b "${{ github.event.inputs.repoBranch }}" "${{github.event.inputs.repoUrl}}" . ; else git clone --depth 1 "${{github.event.inputs.repoUrl}}" . ; fi
+         if [[ "${{ github.event.inputs.dockerFileUrl }}" ]] ;then wget "${{github.event.inputs.dockerFileUrl}}" -O ./Dockerfile ; fi
+         if [[ "${{ github.event.inputs.shellUrl }}" ]] ;then wget "${{github.event.inputs.shellUrl}}" -O /tmp/.customize_shell.sh ; chmod +x /tmp/.customize_shell.sh && /tmp/.customize_shell.sh; fi
+         if [[ "${{ github.event.inputs.shell }}" ]] ;then ""${{github.event.inputs.shell}} ; fi
+         dockerHubUsername=${{ secrets.DOCKER_HUB_USERNAME }}
+         dockerHubPassword=${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+         if [[ "${{ env.DOCKER_HUB_USERNAME }}" ]] ;then dockerHubUsername="${{env.DOCKER_HUB_USERNAME}}" ; fi
+         if [[ "${{ env.DOCKER_HUB_ACCESS_TOKEN }}" ]] ;then githubPassword="${{env.DOCKER_HUB_ACCESS_TOKEN}}" ; fi
+         if [[ "${{ env.tmpUsername }}" ]] ;then dockerHubUsername="${{env.tmpUsername}}" ; fi
+         if [[ "${{ env.tmpToken }}" ]] ;then githubPassword="${{env.tmpToken}}" ; fi
+         imageName=${{github.event.inputs.imageName}}
+         if [[ ! "$imageName" ]] ; then
+         imageName=$(basename "${{github.event.inputs.repoUrl}}" | awk -F '?' '{print $1}')
+         imageName=$(echo "$imageName" | tr '[:upper:]' '[:lower:]')
+         echo "auto docker image name ${{github.event.inputs.repoUrl}} => $imageName"
+         fi
+         echo "dockerHubUsername=$dockerHubUsername" >> $GITHUB_OUTPUT
+         echo "dockerHubPassword=$dockerHubPassword" >> $GITHUB_OUTPUT
+         echo "imageName=$imageName" >> $GITHUB_OUTPUT
+
+      # docker login
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ steps.redy.outputs.dockerHubUsername }}
+          password: ${{ steps.redy.outputs.dockerHubPassword }}
+
+      # 设置 docker buildx 环境
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      # build 前置操作
+      - name: Docker before
+        id: docker_before
+        run: |
+          image="${{ steps.redy.outputs.dockerHubUsername }}/${{ steps.redy.outputs.imageName }}"
+          echo "original image $image"
+          arr=(${image//\// })
+          image=""
+          var_len=${#arr[*]}
+          var_start=$(($var_len - 2))
+          var_end=$(($var_len - 1))
+          for ((i=$var_start; i<=$var_end ; i ++)); do image="${image}/${arr[$i]}"; done
+          image=${image:1}
+          tags="$image:latest"
+          t="${{github.event.inputs.tags}}"
+          if [[ "$t" ]] ; then
+            tags=""
+            echo "customize tags $t"
+            arr=(${t//,/ })
+            for i in ${arr[*]}; do tags="$tags,${image}:$i"; done
+            tags=${tags:1}
+          fi
+          if [[ "${{github.event.inputs.timeTagsFormat}}" != "不生成时间tag" ]] ; then
+            timeFormat="+%m-%d_%H-%M-%S"
+            if [[ "${{github.event.inputs.timeTagsFormat}}" == "年-月-日_时-分-秒" ]] ; then
+                timeFormat="+%y-%m-%d_%H-%M-%S"
+            elif [[ "${{github.event.inputs.timeTagsFormat}}" == "年-月-日_时-分" ]] ; then
+                timeFormat="+%y-%m-%d_%H-%M"
+            elif [[ "${{github.event.inputs.timeTagsFormat}}" == "月-日_时-分" ]] ; then
+                timeFormat="+%m-%d_%H-%M"
+            fi
+            tags="$tags,$image:${{github.event.inputs.timeTagsPrefix}}$(date $timeFormat)"
+          fi
+          echo "target images $tags"
+          echo "tags=$tags" >> $GITHUB_OUTPUT
+
+      # build 并且 push docker 镜像
+      - name: Build and push
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{steps.docker_before.outputs.tags}}
+          platforms: ${{github.event.inputs.platforms}}
+      
+      # 打印 docker 镜像 SHA256 Hash 值
+      - name: Image digest
+        run: echo ${{ steps.docker_build.outputs.digest }}

@@ -1,4 +1,4 @@
-name: 'python-build-and-download'
+name: 'python 构建镜像'
 
 on:
   repository_dispatch:
